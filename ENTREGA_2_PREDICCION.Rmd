@@ -1,0 +1,261 @@
+---
+title: "NBA_2"
+author: "Matias Corredoira"
+date: "7/11/2020"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+
+
+## Cargamos las librerías consideradas necesarias
+
+En primer lugar cargamos las librerías que nos harán falta para las operaciones pertinentes
+
+
+```{r, echo = TRUE, message = FALSE, warning=FALSE}
+library(here)                                                                   # Comentarios 
+library(rsample)                                                                # data splitting
+library(dplyr)
+library(glmnet)                                                                 # implementing regularized regression approaches
+library(tidyverse)
+library(magrittr)                                                               # Pipe operators %<>%
+library(janitor)                                                                # Limpieza de nombres
+```
+
+
+Cargamos la base de datos 
+
+```{r, echo = TRUE}
+nba = read.csv("nba.csv")
+View(nba)
+```
+
+
+
+
+## Limpieza de datos
+
+Marcamos bien los nombres para trabajarlos mejor y pedimos los nuevos resultados
+
+```{r,message = FALSE, warning=FALSE}
+nba %<>% clean_names()   #Ya que con los anteriores es posible que nos surgieran problemas
+
+
+colnames(nba)            #Vemos todas y cada una
+```
+
+
+
+Existen algunos valores duplicados dentro de los jugadores por lo que pedimos la seleccion individual.
+
+```{r, message = FALSE, warning=FALSE}
+nba %<>% distinct(player, .keep_all = T)
+```
+
+
+
+Calculamos la cantidad de valores nan dentro de la base de datos
+Existen, pero son muy pocos, por lo que optamos por borrarlos ya que su cancelacion consideramos que no alteraría los datos de forma significativa.
+
+```{r, message = FALSE, warning=FALSE}
+summarise_all(nba, funs(sum(is.na(.))))
+
+
+
+```
+
+
+
+Los borramos con drop_na()
+
+```{r,message = FALSE, warning=FALSE}
+nba %<>% drop_na()
+
+```
+
+Comprobamos que ya no están
+
+```{r,message = FALSE, warning=FALSE}
+summarise_all(nba, funs(sum(is.na(.))))
+```
+
+
+
+
+En la 1º practica vimos que se trabajaba mejor la variable dependiente salary aplicándole logaritmo por lo que hacemos lo mismo.
+
+```{r, echo = FALSE}
+log_nba <- nba %>% mutate(salary = log(salary))
+```
+
+
+
+Creamos un vector con las variables factor para no incluirlas en los momentos que nos parezca pertinente
+
+```{r}
+vars_cats <- c('player', 'nba_country', 'tm')
+
+log_nba <- log_nba %>% 
+  select_at(vars(-vars_cats))
+```
+
+
+# Elastic Net
+
+
+Creamos una semilla para generar los números aleatorios que consideremos apropiados
+ - Dividimos la base de datos en 2 partes para poder realizar su predicción. Concederemos el 80% de los datos a train y el 20 al test
+
+
+```{r}
+
+set.seed(3131)
+
+nba_split <- initial_split(log_nba, prop = 0.80, strata ="salary")
+nba_train <- training (nba_split)
+nba_test  <- testing (nba_split)
+```
+
+
+Ajustamos
+
+```{r}
+nba_train_x <- model.matrix(salary ~ ., nba_train)[, -1]
+nba_train_y <- log(nba_train$salary)
+
+nba_test_x <- model.matrix(salary~ ., nba_test)[, -1]
+nba_test_y <- log(nba_test$salary)
+
+# comprobacion de que el training esta bien ( siempre mayor que el test)
+dim(nba_train_x)
+```
+
+Marcamos un valor en alpha para cada uno de los modelos
+
+```{r, echo = FALSE}
+
+el1 <- glmnet(nba_train_x, nba_train_y, alpha = 0.25) 
+el2 <- glmnet(nba_train_x, nba_train_y, alpha = 0.75) 
+lasso <- glmnet(nba_train_x, nba_train_y, alpha = 1) 
+ridge <- glmnet(nba_train_x, nba_train_y, alpha = 0.0)
+```
+
+Realizamos una representació gráfica para cada uno de los 4
+
+```{r, echo=TRUE}
+par(mfrow = c(2, 2), mar = c(6, 4, 6, 2) + 0.1)
+plot(lasso, xvar = "lambda", main = "Lasso")
+plot(el1, xvar = "lambda", main = "el1")
+plot(el2, xvar = "lambda", main = "el2")
+plot(ridge, xvar = "lambda", main = "Ridge ")
+
+```
+
+
+
+
+# Tunning
+
+
+En primer lugar mantenemos la misma cantidad de fold.
+De entre los distintos valores de alfa cada 0.1 busca
+
+```{r}
+
+fold_id <- sample(1:10, size = length(nba_train_y), replace=TRUE)
+
+# De entre los distintos valores de alfa cada 0.1 busca
+tuning_grid <- tibble::tibble(
+alpha = seq(0, 1, by = .1),
+mse_min = NA,
+mse_1se = NA,
+lambda_min = NA,
+lambda_1se = NA
+)
+tuning_grid
+```
+
+
+
+
+A continuación se justa el modelo de CV para cada valor alfa.
+Extracción tanto de MSE como de lambda
+
+```{r}
+# completamos la tabla:
+
+for(i in seq_along(tuning_grid$alpha)) {
+  
+# aValor para cada valor alfa
+fit <- cv.glmnet(nba_train_x, nba_train_y, alpha = tuning_grid$alpha[i], foldid = fold_id)
+
+# Extraemos mse y valores alpha
+tuning_grid$mse_min[i] <- fit$cvm[fit$lambda == fit$lambda.min]
+tuning_grid$mse_1se[i] <- fit$cvm[fit$lambda == fit$lambda.1se]
+tuning_grid$lambda_min[i] <- fit$lambda.min
+tuning_grid$lambda_1se[i] <- fit$lambda.1se
+}
+
+tuning_grid
+```
+
+
+Representamos graficamente la relación entre ambas
+
+```{r}
+tuning_grid %>%
+  mutate(se = mse_1se - mse_min) %>%
+  ggplot(aes(alpha, mse_min)) +
+  geom_line(size = 2) +
+  geom_ribbon(aes(ymax = mse_min + se, ymin = mse_min - se), alpha = .4) +
+  ggtitle("MSE ± one standard error for lambda")
+
+
+```
+El valor alpha que minimiza el MSE en el rango pautado anteriormente nos indica que el mejor valor para minimizar MSE es 1.
+
+
+
+
+
+
+## Predicciones
+
+
+Calculamos el mejor modelo 
+
+
+En este caso con Lsso
+
+```{r}
+cv_lasso <- cv.glmnet(nba_train_x, nba_train_y, alpha = 1)
+min(cv_lasso$cvm)
+```
+Realizamos la comparación con los datos reales.
+
+```{r}
+pred <- predict(cv_lasso, s = cv_lasso$lambda.min, nba_test_x)
+mean((nba_test_y - pred)^2)
+```
+Modelo con un alpha de 0.4
+
+```{r}
+cv_net   <- cv.glmnet(nba_train_x, nba_train_y, alpha = 0.4)
+min(cv_net$cvm)
+
+```
+
+
+```{r}
+pred <- predict(cv_net, s = cv_net$lambda.min, nba_test_x)
+mean((nba_test_y - pred)^2)
+```
+
+Como conclusión extraemos que la mejor predicción es la de Lasso dado que es el que nos proporciona un error más bajo respecto a los valores reales.
+
+
+
+
